@@ -22,10 +22,9 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: 번역 라이브러리 설치
-        run: pip install deep-translator
-
       - name: 뉴스 가져오는 스크립트 실행
+        env:
+          DEEPL_KEY: ${{ secrets.DEEPL_KEY }}
         run: python fetch_news.py
 
       - name: 변경된 index.html 커밋 및 푸시
