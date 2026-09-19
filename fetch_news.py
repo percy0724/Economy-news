@@ -681,14 +681,22 @@ def main():
     print(f"[수집] 전체 {len(all_items)}건")
 
     if all_items:
-        mapping = translate_titles([i["title"] for i in all_items])
+        title_map = translate_titles([i["title"] for i in all_items])
         for item in all_items:
-            item["title_ko"] = mapping.get(item["title"], item["title"])
+            item["title_ko"] = title_map.get(item["title"], item["title"])
 
         done = sum(1 for i in all_items if i["title_ko"] != i["title"])
-        print(f"[번역] 성공 {done} / 전체 {len(all_items)}")
+        print(f"[번역] 제목 성공 {done} / 전체 {len(all_items)}")
         if done == 0:
             print("[경고] 번역이 하나도 되지 않았습니다. 위의 실패 메시지를 확인하세요.")
+
+        # 요약문(summary)도 같은 방식으로 번역합니다.
+        original_summaries = [i["summary"] for i in all_items if i["summary"]]
+        summary_map = translate_titles(original_summaries) if original_summaries else {}
+        for item in all_items:
+            if item["summary"]:
+                item["summary"] = summary_map.get(item["summary"], item["summary"])
+        print(f"[번역] 요약 {len(original_summaries)}건 처리")
 
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(build_html(all_items))
