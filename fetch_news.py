@@ -318,6 +318,57 @@ def fetch_feed(feed):
     return items
 
 
+def fetch_og_description(url):
+    """
+    기사 페이지에 접속해서 og:description(또는 meta description)을 가져옵니다.
+    언론사가 SNS 공유용으로 직접 써둔 요약이라, RSS 소개글보다 알맹이가 있는 경우가 많아요.
+    실패하면 None을 반환합니다(그러면 기존 RSS 요약을 그대로 씁니다).
+    """
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": BROWSER_UA, "Accept": "text/html"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw = resp.read(120_000)  # <head>만 필요하니 앞부분만 읽어서 속도를 확보
+        text = raw.decode("utf-8", errors="ignore")
+
+        patterns = [
+            r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:description["\']',
+            r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']description["\']',
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                desc = html.unescape(m.group(1)).strip()
+                desc = re.sub(r"\s+", " ", desc)
+                if len(desc) > 220:
+                    desc = desc[:220].rsplit(" ", 1)[0] + "…"
+                if len(desc) > 15:  # 너무 짧으면(빈 문구 등) 의미 없다고 보고 버림
+                    return desc
+        return None
+    except Exception as e:
+        print(f"[요약 보강 실패] {url[:60]}...: {e}")
+        return None
+
+
+def enrich_summaries(items):
+    """
+    각 기사 페이지에 접속해서 더 알맹이 있는 요약으로 교체를 시도합니다.
+    실패한 기사는 기존 RSS 소개글을 그대로 유지합니다(사이트가 비지 않도록).
+    """
+    upgraded = 0
+    for item in items:
+        better = fetch_og_description(item["link"])
+        if better:
+            item["summary"] = better
+            upgraded += 1
+        time.sleep(0.3)  # 언론사 서버에 너무 빠르게 연속 요청하지 않도록 살짝 대기
+    print(f"[요약 보강] {upgraded} / {len(items)}건 교체")
+
+
 def collect_all():
     all_items = []
     seen_links = set()
@@ -331,6 +382,9 @@ def collect_all():
 
     oldest = datetime(1970, 1, 1, tzinfo=timezone.utc)
     all_items.sort(key=lambda x: x["published"] or oldest, reverse=True)
+
+    enrich_summaries(all_items)
+
     return all_items
 
 
