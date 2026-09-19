@@ -5,6 +5,9 @@
 - 여러 언론사가 동시에 다루는 뉴스는 "주요 뉴스"로 묶어서 맨 위에 표시
 - 나머지는 카테고리별로 분류
 - 제목을 한국어로 번역 (DeepL 우선, 실패하면 구글 번역으로 자동 대체)
+- 각 기사에 "요약 + 영향" 보기를 붙임 (완전 무료: AI 호출 없음)
+  - 요약: 언론사가 RSS에 이미 넣어준 소개글(description)을 그대로 사용
+  - 영향: 카테고리별로 미리 써둔 일반적인 설명 (기사마다 다르진 않음)
 - 시간은 한국 시간(KST)으로 표시
 
 GitHub Actions가 매시간 자동 실행합니다.
@@ -34,9 +37,9 @@ RSS_FEEDS = [
     {"name": "CNBC", "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html"},
     {"name": "MarketWatch", "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories"},
     {"name": "BBC", "url": "https://feeds.bbci.co.uk/news/business/rss.xml"},
-    {"name": "NPR", "url": "https://feeds.npr.org/1006/rss.xml"},
+    {"name": "Fortune", "url": "https://fortune.com/feed"},
     {"name": "The Guardian", "url": "https://www.theguardian.com/business/rss"},
-    {"name": "Business Insider", "url": "https://feeds.businessinsider.com/custom/all"},
+    {"name": "Al Jazeera", "url": "https://www.aljazeera.com/xml/rss/all.xml"},
 ]
 
 MAX_ITEMS_PER_FEED = 10
@@ -49,9 +52,6 @@ BROWSER_UA = (
 )
 
 # 카테고리 분류 규칙. 위에서부터 순서대로 검사해 먼저 맞는 것으로 정합니다.
-# 각 항목은 정규식이며, \b 는 단어 경계입니다.
-# 예전 코드의 "ai " 키워드는 Dubai, Shanghai 같은 지명에도 걸렸는데
-# \bai\b 로 바꿔서 그 문제를 막았습니다.
 CATEGORY_RULES = [
     ("전쟁·지정학", [
         r"\bwar\b", r"\bwarfare\b", r"houthi", r"\biran\b", r"ukraine", r"russia",
@@ -79,11 +79,20 @@ CATEGORY_RULES = [
 DEFAULT_CATEGORY = "기타"
 CATEGORY_ORDER = [name for name, _ in CATEGORY_RULES] + [DEFAULT_CATEGORY]
 
-# 규칙을 미리 컴파일해 두면 매번 다시 만들지 않아 빠릅니다.
 COMPILED_RULES = [
     (name, [re.compile(p, re.IGNORECASE) for p in patterns])
     for name, patterns in CATEGORY_RULES
 ]
+
+# 카테고리별 "영향" 일반 설명 (완전 무료 - 기사마다 다르지 않고, 카테고리 단위로 미리 써둔 설명)
+CATEGORY_IMPACT = {
+    "전쟁·지정학": "지정학적 긴장은 보통 유가·금·안전자산 수요에 영향을 주고, 관련 지역에 노출된 기업 주가가 출렁일 수 있어요.",
+    "유가·원자재": "유가·원자재 가격 변동은 항공·운송·정유 업종 실적과 소비자물가에 직접적인 영향을 줄 수 있어요.",
+    "금리·연준": "금리·중앙은행 발표는 대출 비용, 주식·채권 시장 전반, 환율에 폭넓게 영향을 미치는 경향이 있어요.",
+    "AI·테크": "AI·기술 관련 소식은 반도체·빅테크 주가와 관련 산업의 투자 심리에 영향을 줄 수 있어요.",
+    "주식·증시": "개별 기업·시장 지표 소식은 해당 종목이나 업종의 단기 주가 흐름에 영향을 줄 수 있어요.",
+    "기타": "이 카테고리는 특정 산업에 국한되지 않는 일반 경제/사회 뉴스예요.",
+}
 
 # 클러스터링(같은 사건 감지)용 불용어. 이 단어들은 핵심 단어로 세지 않습니다.
 STOPWORDS = {
@@ -100,23 +109,17 @@ STOPWORDS = {
 
 
 def translate_with_deepl(titles):
-    """
-    DeepL API로 제목들을 한 번에 번역합니다.
-    키가 없거나 실패하면 None을 반환해 구글 번역으로 넘어갑니다.
-    """
     key = os.environ.get("DEEPL_KEY", "").strip()
     if not key:
         print("[번역] DEEPL_KEY가 없어 구글 번역을 사용합니다.")
         return None
 
-    # 무료 키는 끝이 ":fx" 로 끝납니다. 유료 키는 주소가 다릅니다.
     if key.endswith(":fx"):
         endpoint = "https://api-free.deepl.com/v2/translate"
     else:
         endpoint = "https://api.deepl.com/v2/translate"
 
     result = {}
-    # DeepL은 한 요청에 최대 50개까지 보낼 수 있습니다.
     for i in range(0, len(titles), 40):
         chunk = titles[i:i + 40]
         try:
@@ -147,11 +150,6 @@ def translate_with_deepl(titles):
 
 
 def translate_with_google(titles):
-    """
-    구글 번역의 공개 엔드포인트를 사용합니다. 키는 필요 없습니다.
-    제목을 구분자로 이어 붙여 한 번에 보내므로 요청 수가 크게 줄고,
-    그만큼 차단될 확률도 낮아집니다.
-    """
     SEP = "\n@@@\n"
     result = {}
 
@@ -161,9 +159,7 @@ def translate_with_google(titles):
 
         for attempt in range(3):
             try:
-                params = {
-                    "client": "gtx", "sl": "en", "tl": "ko", "dt": "t", "q": joined,
-                }
+                params = {"client": "gtx", "sl": "en", "tl": "ko", "dt": "t", "q": joined}
                 url = (
                     "https://translate.googleapis.com/translate_a/single?"
                     + urllib.parse.urlencode(params)
@@ -185,7 +181,6 @@ def translate_with_google(titles):
                             result[original] = translated
                     print(f"[번역] 구글 {len(chunk)}건 처리")
                 else:
-                    # 구분자가 번역 과정에서 깨진 경우. 이 묶음은 건너뜁니다.
                     print(f"[경고] 구분자 개수 불일치 {len(parts)} vs {len(chunk)}, 건너뜀")
                 break
             except Exception as e:
@@ -198,10 +193,6 @@ def translate_with_google(titles):
 
 
 def translate_titles(titles):
-    """
-    DeepL을 먼저 시도하고, 안 되면 구글로 넘어갑니다.
-    {원문: 번역문} 딕셔너리를 반환하며, 번역 못 한 제목은 원문 그대로 들어갑니다.
-    """
     unique = sorted(set(titles))
     if not unique:
         return {}
@@ -210,7 +201,6 @@ def translate_titles(titles):
     if mapping is None:
         mapping = translate_with_google(unique)
 
-    # 빠진 제목은 원문으로 채웁니다.
     for t in unique:
         mapping.setdefault(t, t)
     return mapping
@@ -220,7 +210,6 @@ def translate_titles(titles):
 
 
 def classify(title):
-    """제목(영문)의 키워드를 보고 카테고리를 정합니다."""
     for category, patterns in COMPILED_RULES:
         for pattern in patterns:
             if pattern.search(title):
@@ -229,16 +218,11 @@ def classify(title):
 
 
 def significant_words(title):
-    """제목에서 핵심 단어(4글자 이상, 불용어 제외)만 뽑아 집합으로 반환."""
     words = re.findall(r"[a-zA-Z']+", title.lower())
     return {w for w in words if len(w) > 3 and w not in STOPWORDS}
 
 
 def cluster_items(items):
-    """
-    핵심 단어가 많이 겹치는, 서로 다른 언론사의 기사를 한 사건으로 묶습니다.
-    같은 언론사끼리는 묶지 않습니다(같은 매체의 후속 기사 오탐 방지).
-    """
     clusters = []
     for item in items:
         words = significant_words(item["title"])
@@ -267,7 +251,6 @@ def cluster_items(items):
 
 
 def parse_pubdate(raw):
-    """RSS의 날짜 문자열을 datetime으로 바꿉니다. 실패하면 None."""
     if not raw:
         return None
     try:
@@ -279,8 +262,19 @@ def parse_pubdate(raw):
         return None
 
 
+def clean_description(raw):
+    """RSS description에서 HTML 태그를 걷어내고 적당한 길이로 자릅니다."""
+    if not raw:
+        return ""
+    text = re.sub(r"<[^>]+>", " ", raw)          # 태그 제거
+    text = html.unescape(text)                    # &amp; 같은 엔티티 복원
+    text = re.sub(r"\s+", " ", text).strip()       # 중복 공백 정리
+    if len(text) > 220:
+        text = text[:220].rsplit(" ", 1)[0] + "…"
+    return text
+
+
 def fetch_feed(feed):
-    """RSS 주소 하나를 가져와 뉴스 항목 리스트로 반환합니다."""
     items = []
     try:
         req = urllib.request.Request(
@@ -295,8 +289,15 @@ def fetch_feed(feed):
             title = (node.findtext("title") or "").strip()
             link = (node.findtext("link") or "").strip()
             pub_raw = (node.findtext("pubDate") or "").strip()
+            desc_raw = node.findtext("description") or node.findtext("summary") or ""
 
             if not title or not link:
+                continue
+
+            category = classify(title)
+
+            # MarketWatch가 "기타"로 분류되는 기사는 영양가가 낮아 제외합니다.
+            if feed["name"] == "MarketWatch" and category == DEFAULT_CATEGORY:
                 continue
 
             items.append({
@@ -305,19 +306,19 @@ def fetch_feed(feed):
                 "link": link,
                 "published": parse_pubdate(pub_raw),
                 "source": feed["name"],
-                "category": classify(title),
+                "category": category,
+                "summary": clean_description(desc_raw),
+                "impact": CATEGORY_IMPACT.get(category, ""),
             })
 
         print(f"[수집] {feed['name']}: {len(items)}건")
     except Exception as e:
-        # 이 소스가 실패해도 전체 스크립트는 멈추지 않습니다.
         print(f"[경고] {feed['name']} 가져오기 실패: {e}")
 
     return items
 
 
 def collect_all():
-    """모든 피드를 수집하고 중복 링크를 제거합니다."""
     all_items = []
     seen_links = set()
 
@@ -328,7 +329,6 @@ def collect_all():
             seen_links.add(item["link"])
             all_items.append(item)
 
-    # 최신순 정렬. 날짜를 못 읽은 기사는 뒤로 보냅니다.
     oldest = datetime(1970, 1, 1, tzinfo=timezone.utc)
     all_items.sort(key=lambda x: x["published"] or oldest, reverse=True)
     return all_items
@@ -338,10 +338,21 @@ def collect_all():
 
 
 def format_time(dt):
-    """datetime을 한국 시간 문자열로. 없으면 빈 문자열."""
     if not dt:
         return ""
     return dt.astimezone(KST).strftime("%m월 %d일 %H:%M")
+
+
+def render_details(item):
+    """요약 + 영향 보기 (완전 무료: RSS 소개글 + 카테고리별 일반 설명)"""
+    summary = html.escape(item["summary"]) if item["summary"] else "이 언론사는 별도 소개글을 제공하지 않았어요."
+    impact = html.escape(item["impact"])
+    return f"""
+      <details class="detail">
+        <summary>🔍 요약 · 영향 보기</summary>
+        <p class="detail-line"><b>요약</b> {summary}</p>
+        <p class="detail-line"><b>영향</b> {impact}</p>
+      </details>"""
 
 
 def render_item(item):
@@ -352,8 +363,6 @@ def render_item(item):
     when = html.escape(format_time(item["published"]))
     meta = f"{source} · {when}" if when else source
 
-    # 번역이 된 기사만 원문을 따로 보여줍니다.
-    # (번역 실패 시 같은 문장이 두 번 나오는 걸 막습니다)
     original_html = ""
     if item["title_ko"] != item["title"]:
         original_html = f'\n      <p class="original">{title_en}</p>'
@@ -361,12 +370,11 @@ def render_item(item):
     return f"""
     <li class="item">
       <a class="headline" href="{link}" target="_blank" rel="noopener">{title_ko}</a>{original_html}
-      <p class="meta">{meta}</p>
+      <p class="meta">{meta}</p>{render_details(item)}
     </li>"""
 
 
 def render_top_cluster(cluster):
-    """여러 언론사가 동시에 보도한 사건 하나를 렌더링합니다."""
     items = cluster["items"]
     main = items[0]
     title_ko = html.escape(main["title_ko"])
@@ -385,7 +393,7 @@ def render_top_cluster(cluster):
     return f"""
     <li class="item item-top">
       <a class="headline" href="{html.escape(main["link"])}" target="_blank" rel="noopener">{title_ko}</a>{original_html}
-      <p class="meta">{len(items)}개 언론사 보도: {links}</p>
+      <p class="meta">{len(items)}개 언론사 보도: {links}</p>{render_details(main)}
     </li>"""
 
 
@@ -570,6 +578,31 @@ def build_html(all_items):
   }}
 
   .meta a:hover {{ text-decoration: underline; }}
+
+  .detail {{
+    margin-top: 0.625rem;
+    border-top: 1px dashed var(--rule);
+    padding-top: 0.5rem;
+  }}
+
+  .detail summary {{
+    cursor: pointer;
+    color: var(--accent);
+    font-size: 0.8125rem;
+    font-weight: 600;
+  }}
+
+  .detail-line {{
+    margin: 0.5rem 0 0;
+    font-size: 0.8125rem;
+    color: var(--ink-soft);
+    line-height: 1.55;
+  }}
+
+  .detail-line b {{
+    color: var(--ink);
+    margin-right: 0.25rem;
+  }}
 
   .empty {{ color: var(--ink-soft); }}
 </style>
